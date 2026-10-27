@@ -101,8 +101,9 @@ func connectWithTimeout(
 
 // closeAcquireTimeout bounds close()'s wait for the reader. Pool.Release
 // calls close() on the caller's goroutine, so a connection whose reader
-// hand-off is broken must still close instead of parking the caller.
-var closeAcquireTimeout = 5 * time.Second
+// hand-off is broken must still close instead of parking the caller. A
+// healthy hand-off takes microseconds; a second is already generous.
+var closeAcquireTimeout = time.Second
 
 func (c *protocolConnection) acquireReader(
 	ctx context.Context,
@@ -126,8 +127,9 @@ func (c *protocolConnection) acquireReader(
 	select {
 	case c.acquireReaderSignal <- struct{}{}:
 	case <-ctx.Done():
-		// The signal channel is full: this connection's hand-off is
-		// already broken. Retire it rather than pass the state on.
+		// ctx ended while the send waited (the channel was full), or
+		// both were ready and the select picked ctx. The hand-off state
+		// is not known from here, so retire the connection.
 		_ = c.soc.Close()
 		return nil, wrapNetError(ctx.Err())
 	}

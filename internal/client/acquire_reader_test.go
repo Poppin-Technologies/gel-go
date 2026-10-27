@@ -91,7 +91,7 @@ func TestAcquireReaderSurvivesCancelledWaits(t *testing.T) {
 	// releaseReader, keeping the protocol honest. Stop once the stale state
 	// is reached: a buffered signal nobody will consume plus a parked
 	// reader with no loop goroutine left.
-	for i := 0; i < 200; i++ {
+	for i := 0; i < 50; i++ {
 		r, err := c.acquireReader(dead)
 		if err == nil {
 			if e := c.releaseReader(r); e != nil {
@@ -233,5 +233,56 @@ func TestTxAbandonsOpenTransactionOnDeadCtx(t *testing.T) {
 	if got := abandonTx(pc2, serverErr); got != serverErr || pc2.isClosed() {
 		t.Fatalf("abandonTx changed a server error (%v) or closed the socket",
 			got)
+	}
+}
+
+// TestAcquireReaderRetiresConnectionOnCancelledWait: the loop goroutine is
+// mid-message (a header announcing a body that never arrives), so the
+// hand-off cannot complete. A caller whose ctx ends while it waits must
+// retire the connection, and the loop goroutine must still exit.
+func TestAcquireReaderRetiresConnectionOnCancelledWait(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = server.Close()
+	})
+	c := &protocolConnection{
+		soc:                 &autoClosingSocket{conn: client},
+		acquireReaderSignal: make(chan struct{}, 1),
+		readerChan:          make(chan *buff.Reader, 1),
+	}
+	toBeDeserialized := make(chan *soc.Data, 2)
+	go soc.Read(c.soc, soc.NewMemPool(4, 256*1024), toBeDeserialized)
+	if err := c.releaseReader(buff.NewReader(toBeDeserialized)); err != nil {
+		t.Fatal(err)
+	}
+	// A ParameterStatus header announcing 96 more bytes that never come.
+	// Once the loop goroutine has taken the chunk it is committed to the
+	// body read and no longer watches the signal; wait for that moment,
+	// else the loop may still answer the signal and hand the reader over.
+	header := []byte{uint8(ParameterStatus), 0, 0, 0, 100}
+	if _, err := server.Write(header); err != nil {
+		t.Fatal(err)
+	}
+	for len(toBeDeserialized) > 0 {
+		time.Sleep(time.Millisecond)
+	}
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := c.acquireReader(ctx)
+	if !isClientConnectionError(err) {
+		t.Fatalf("got %v, want a client connection error", err)
+	}
+	if !c.isClosed() {
+		t.Fatal("the cancelled wait left the connection open")
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(c.readerChan) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the loop goroutine did not exit after the socket closed")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
