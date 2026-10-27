@@ -31,6 +31,26 @@ type transactableConn struct {
 	*reconnectingConn
 }
 
+// sleepBackoff waits out a retry back-off unless ctx ends first. A query
+// whose ctx is already over cannot succeed on retry; retrying it only
+// re-entered the connection with a dead ctx, which is how the reader
+// hand-off used to get stranded (see acquireReader).
+func sleepBackoff(ctx context.Context, d time.Duration) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+
+	t := time.NewTimer(d)
+	defer t.Stop()
+
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 func (c *transactableConn) withRetries(
 	ctx context.Context,
 	q *query,
@@ -71,7 +91,9 @@ func (c *transactableConn) withRetries(
 				return err
 			}
 
-			time.Sleep(rule.Backoff()(i))
+			if !sleepBackoff(ctx, rule.Backoff()(i)) {
+				return err
+			}
 			continue
 		}
 
@@ -167,7 +189,9 @@ func (c *transactableConn) Tx(
 				return err
 			}
 
-			time.Sleep(rule.Backoff()(i))
+			if !sleepBackoff(ctx, rule.Backoff()(i)) {
+				return err
+			}
 			continue
 		}
 
