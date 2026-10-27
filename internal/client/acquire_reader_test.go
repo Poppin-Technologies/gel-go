@@ -251,8 +251,21 @@ func TestAcquireReaderRetiresConnectionOnCancelledWait(t *testing.T) {
 		acquireReaderSignal: make(chan struct{}, 1),
 		readerChan:          make(chan *buff.Reader, 1),
 	}
+	// The real socket reader feeds the loop through a forwarder so the test
+	// can see when a chunk has reached the reader's channel.
+	raw := make(chan *soc.Data, 2)
 	toBeDeserialized := make(chan *soc.Data, 2)
-	go soc.Read(c.soc, soc.NewMemPool(4, 256*1024), toBeDeserialized)
+	pushed := make(chan struct{}, 8)
+	go soc.Read(c.soc, soc.NewMemPool(4, 256*1024), raw)
+	go func() {
+		for d := range raw {
+			toBeDeserialized <- d
+			pushed <- struct{}{}
+			if d.Err != nil {
+				return
+			}
+		}
+	}()
 	if err := c.releaseReader(buff.NewReader(toBeDeserialized)); err != nil {
 		t.Fatal(err)
 	}
@@ -264,6 +277,7 @@ func TestAcquireReaderRetiresConnectionOnCancelledWait(t *testing.T) {
 	if _, err := server.Write(header); err != nil {
 		t.Fatal(err)
 	}
+	<-pushed
 	for len(toBeDeserialized) > 0 {
 		time.Sleep(time.Millisecond)
 	}
