@@ -18,6 +18,7 @@ package gel
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -98,6 +99,11 @@ func connectWithTimeout(
 	return conn, conn.releaseReader(r)
 }
 
+// closeAcquireTimeout bounds close()'s wait for the reader. Pool.Release
+// calls close() on the caller's goroutine, so a connection whose reader
+// hand-off is broken must still close instead of parking the caller.
+var closeAcquireTimeout = 5 * time.Second
+
 func (c *protocolConnection) acquireReader(
 	ctx context.Context,
 ) (*buff.Reader, error) {
@@ -105,7 +111,27 @@ func (c *protocolConnection) acquireReader(
 		return nil, gelerr.NewClientConnectionClosedError("", nil)
 	}
 
-	c.acquireReaderSignal <- struct{}{}
+	// A ctx that is already over never touches the hand-off channels. The
+	// signal used to be sent unconditionally and the select below could
+	// then leave on ctx.Done(), stranding the connection: the signal
+	// stayed buffered with nobody to consume it, or the reader was parked
+	// in readerChan with no loop goroutine left. The next acquire on the
+	// connection (a retry of the same dead query, or close() from
+	// Pool.Release) blocked forever on the full 1-slot signal channel.
+	// Nothing was touched here, so the pool keeps the connection.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("gel: %w", err)
+	}
+
+	select {
+	case c.acquireReaderSignal <- struct{}{}:
+	case <-ctx.Done():
+		// The signal channel is full: this connection's hand-off is
+		// already broken. Retire it rather than pass the state on.
+		_ = c.soc.Close()
+		return nil, wrapNetError(ctx.Err())
+	}
+
 	select {
 	case r := <-c.readerChan:
 		if r.Err != nil {
@@ -116,6 +142,12 @@ func (c *protocolConnection) acquireReader(
 		}
 		return r, nil
 	case <-ctx.Done():
+		// The signal is out and the reader will be parked for nobody.
+		// Retire the connection: every later acquire (close() included)
+		// fails fast with ClientConnectionClosedError and the pool
+		// reconnects; the loop goroutine exits on the signal or on the
+		// closed socket.
+		_ = c.soc.Close()
 		return nil, wrapNetError(ctx.Err())
 	}
 }
@@ -171,13 +203,17 @@ func (c *protocolConnection) close() error {
 		)
 	}
 
-	_, err := c.acquireReader(context.Background())
-	if err != nil {
-		return err
+	// Bounded: Pool.Release calls close() on the caller's goroutine, and
+	// the socket closes whether or not the reader ever comes back.
+	ctx, cancel := context.WithTimeout(
+		context.Background(), closeAcquireTimeout)
+	defer cancel()
+
+	if _, err := c.acquireReader(ctx); err != nil {
+		return FirstError(err, c.soc.Close())
 	}
 
-	err = c.terminate()
-	if err != nil {
+	if err := c.terminate(); err != nil {
 		return err
 	}
 

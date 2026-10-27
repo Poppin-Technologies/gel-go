@@ -162,3 +162,37 @@ func TestWithRetriesStopsOnDeadContext(t *testing.T) {
 		t.Fatalf("withRetries took %v on a dead ctx, want no back-off", d)
 	}
 }
+
+// TestCloseReturnsOnBrokenHandoff: close() acquires the reader before the
+// Terminate message. It used to wait with context.Background(); on a
+// connection whose hand-off was broken it never returned, and Pool.Release,
+// which calls it, parked the request's goroutine with it.
+func TestCloseReturnsOnBrokenHandoff(t *testing.T) {
+	c := newIdlePipeConn(t)
+	r, err := c.acquireReader(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Break the hand-off by hand: park the reader with no loop goroutine
+	// and leave a signal nobody will consume.
+	c.readerChan <- r
+	c.acquireReaderSignal <- struct{}{}
+
+	old := closeAcquireTimeout
+	closeAcquireTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { closeAcquireTimeout = old })
+
+	done := make(chan error, 1)
+	go func() { done <- c.close() }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("close() returned nil on a broken hand-off")
+		}
+		if !c.isClosed() {
+			t.Fatal("close() returned but left the socket open")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("close() parked on the broken hand-off")
+	}
+}
