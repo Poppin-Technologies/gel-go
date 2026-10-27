@@ -111,12 +111,15 @@ func (c *transactableConn) ScriptFlow(ctx context.Context, q *query) error {
 	return c.withRetries(ctx, q, c.reconnectingConn.ScriptFlow)
 }
 
-// abandonTx retires the connection when a commit or rollback could not
-// even be sent: a plain ctx error means nothing reached the server, so the
-// transaction is still open there. Closing the socket makes the server
-// roll it back and makes Pool.Release drop the connection instead of
-// pooling a session that is mid-transaction. A gelerr.Error means the
-// server answered; it passes through untouched.
+// abandonTx retires the connection when a commit or rollback did not get
+// a server answer: a gelerr.Error means the server answered and passes
+// through untouched; anything else means the statement was never sent (a
+// dead ctx) or its answer could not be read, so the transaction may still
+// be open on the server. Closing the socket makes the server roll it back
+// and keeps a mid-transaction session out of the pool. A ctx error is
+// returned as ClientConnectionClosedError so Pool.Release drops the
+// connection at once; any other error keeps its type (the outcome is
+// unknown, a caller must not take it for a retryable connection loss).
 func abandonTx(conn *protocolConnection, err error) error {
 	var edbErr gelerr.Error
 	if err == nil || errors.As(err, &edbErr) {
@@ -124,7 +127,12 @@ func abandonTx(conn *protocolConnection, err error) error {
 	}
 
 	_ = conn.soc.Close()
-	return gelerrint.NewClientConnectionClosedError("", err)
+	if errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) {
+		return gelerrint.NewClientConnectionClosedError("", err)
+	}
+
+	return err
 }
 
 func (c *transactableConn) Tx(
@@ -173,7 +181,11 @@ func (c *transactableConn) Tx(
 					goto Error
 				}
 				return err
-			} else if isClientConnectionError(err) {
+			} else if isClientConnectionError(err) && conn.isClosed() {
+				// This socket is gone; the server dropped the transaction
+				// with it. A connection error from elsewhere (the callback
+				// used another client) leaves this transaction open, so it
+				// still gets the rollback below.
 				goto Error
 			}
 

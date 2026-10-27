@@ -18,6 +18,7 @@ package gel
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -234,6 +235,15 @@ func TestTxAbandonsOpenTransactionOnDeadCtx(t *testing.T) {
 		t.Fatalf("abandonTx changed a server error (%v) or closed the socket",
 			got)
 	}
+
+	// An unknown outcome (not a ctx error, no server answer) closes the
+	// socket but keeps its error type: nobody may read it as retryable.
+	pc3 := newIdlePipeConn(t)
+	other := errors.New("decode failed")
+	if got := abandonTx(pc3, other); got != other || !pc3.isClosed() {
+		t.Fatalf("abandonTx on an unknown outcome: got %v closed=%v",
+			got, pc3.isClosed())
+	}
 }
 
 // TestAcquireReaderRetiresConnectionOnCancelledWait: the loop goroutine is
@@ -282,10 +292,20 @@ func TestAcquireReaderRetiresConnectionOnCancelledWait(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 
-	ctx, cancel := context.WithTimeout(
-		context.Background(), 50*time.Millisecond)
+	// Cancel only once the signal is out, so the test exercises the wait
+	// after the send and never the early return.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	_, err := c.acquireReader(ctx)
+	result := make(chan error, 1)
+	go func() {
+		_, err := c.acquireReader(ctx)
+		result <- err
+	}()
+	for len(c.acquireReaderSignal) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	err := <-result
 	if !isClientConnectionError(err) {
 		t.Fatalf("got %v, want a client connection error", err)
 	}
