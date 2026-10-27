@@ -111,6 +111,22 @@ func (c *transactableConn) ScriptFlow(ctx context.Context, q *query) error {
 	return c.withRetries(ctx, q, c.reconnectingConn.ScriptFlow)
 }
 
+// abandonTx retires the connection when a commit or rollback could not
+// even be sent: a plain ctx error means nothing reached the server, so the
+// transaction is still open there. Closing the socket makes the server
+// roll it back and makes Pool.Release drop the connection instead of
+// pooling a session that is mid-transaction. A gelerr.Error means the
+// server answered; it passes through untouched.
+func abandonTx(conn *protocolConnection, err error) error {
+	var edbErr gelerr.Error
+	if err == nil || errors.As(err, &edbErr) {
+		return err
+	}
+
+	_ = conn.soc.Close()
+	return gelerrint.NewClientConnectionClosedError("", err)
+}
+
 func (c *transactableConn) Tx(
 	ctx context.Context,
 	action types.TxBlock,
@@ -150,7 +166,7 @@ func (c *transactableConn) Tx(
 
 			err = action(ctx, tx)
 			if err == nil {
-				err = tx.commit(ctx)
+				err = abandonTx(conn, tx.commit(ctx))
 				if errors.As(err, &edbErr) &&
 					edbErr.Category(gelerr.TransactionError) &&
 					edbErr.HasTag(gelerr.ShouldRetry) {
@@ -162,7 +178,7 @@ func (c *transactableConn) Tx(
 			}
 
 			if e := tx.rollback(ctx); e != nil && !errors.As(e, &edbErr) {
-				return e
+				return abandonTx(conn, e)
 			}
 		}
 

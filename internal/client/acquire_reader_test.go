@@ -25,6 +25,7 @@ import (
 	"github.com/geldata/gel-go/gelcfg"
 	"github.com/geldata/gel-go/internal/buff"
 	"github.com/geldata/gel-go/internal/cache"
+	gelerrint "github.com/geldata/gel-go/internal/gelerr"
 	"github.com/geldata/gel-go/internal/soc"
 )
 
@@ -194,5 +195,43 @@ func TestCloseReturnsOnBrokenHandoff(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("close() parked on the broken hand-off")
+	}
+}
+
+// TestTxAbandonsOpenTransactionOnDeadCtx: with the ctx already over,
+// rollback (like commit) fails before anything reaches the server, so the
+// transaction stays open there. Tx must retire the connection instead of
+// letting Pool.Release put a mid-transaction session back into the pool.
+func TestTxAbandonsOpenTransactionOnDeadCtx(t *testing.T) {
+	pc := newIdlePipeConn(t)
+	tx := &Tx{
+		borrowableConn: borrowableConn{conn: pc},
+		txState:        &txState{txStatus: startedTx},
+	}
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	e := tx.rollback(dead)
+	if e == nil {
+		t.Fatal("rollback on a dead ctx returned nil")
+	}
+	if isClientConnectionError(e) || pc.isClosed() {
+		t.Fatalf("rollback alone must not touch the connection: %v", e)
+	}
+
+	e = abandonTx(pc, e)
+	if !isClientConnectionError(e) {
+		t.Fatalf("abandonTx returned %T, want a client connection error", e)
+	}
+	if !pc.isClosed() {
+		t.Fatal("abandonTx left the socket open with a transaction on it")
+	}
+
+	// A server answer passes through untouched.
+	pc2 := newIdlePipeConn(t)
+	serverErr := gelerrint.NewTransactionSerializationError("", nil)
+	if got := abandonTx(pc2, serverErr); got != serverErr || pc2.isClosed() {
+		t.Fatalf("abandonTx changed a server error (%v) or closed the socket",
+			got)
 	}
 }
