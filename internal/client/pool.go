@@ -48,10 +48,12 @@ func NewPool(dsn string, opts gelcfg.Options) (*Pool, error) { // nolint:gocriti
 
 	False := false
 	p := &Pool{
-		isClosed:             &False,
-		isClosedMutex:        &sync.RWMutex{},
-		Cfg:                  cfg,
-		Concurrency:          int(opts.Concurrency),
+		isClosed:      &False,
+		isClosedMutex: &sync.RWMutex{},
+		Cfg:           cfg,
+		Concurrency:   int(opts.Concurrency),
+		dial: newDialGate(
+			opts.DialConcurrency, opts.DialBackoffMax),
 		freeConns:            make(chan func() *transactableConn, 1),
 		potentialConnsMutext: &sync.Mutex{},
 		cacheCollection: cacheCollection{
@@ -94,6 +96,10 @@ type Pool struct {
 	State           map[string]interface{}
 
 	Concurrency int
+
+	// dial limits how many connections this pool dials at once and backs
+	// off after failed dials (dialgate.go); nil when neither is configured.
+	dial *dialGate
 }
 
 func (p *Pool) newConn(ctx context.Context) (*transactableConn, error) {
@@ -101,6 +107,7 @@ func (p *Pool) newConn(ctx context.Context) (*transactableConn, error) {
 		reconnectingConn: &reconnectingConn{
 			Cfg:             p.Cfg,
 			cacheCollection: p.cacheCollection,
+			dial:            p.dial,
 		},
 	}
 

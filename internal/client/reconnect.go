@@ -30,6 +30,9 @@ type reconnectingConn struct {
 	cacheCollection
 	Cfg *connConfig
 
+	// dial is the pool's dial gate (nil: unlimited), see dialgate.go.
+	dial *dialGate
+
 	// isClosed is true when the connection has been closed by a user.
 	isClosed bool
 }
@@ -52,11 +55,18 @@ func (c *reconnectingConn) reconnect(
 
 	var edbErr gelerr.Error
 	for {
+		if err := c.dial.acquire(ctx); err != nil {
+			statDialFailures.Add(1)
+			return err
+		}
+		statDials.Add(1)
 		conn, err := connectWithTimeout(ctx, c.Cfg, c.cacheCollection)
+		c.dial.release(err)
 		if err == nil {
 			c.conn = conn
 			return nil
 		}
+		statDialFailures.Add(1)
 		if single ||
 			errors.Is(err, context.Canceled) ||
 			errors.Is(err, context.DeadlineExceeded) ||

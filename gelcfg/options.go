@@ -124,6 +124,16 @@ type Options struct {
 	// Has no effect for single connections.
 	Concurrency uint
 
+	// DialConcurrency caps how many connections the client dials at the
+	// same time; 0 means no cap. A saturated server cannot accept a burst
+	// of new connections, and every dial it fails to answer costs it work.
+	DialConcurrency uint
+
+	// DialBackoffMax holds dials back after one times out or fails
+	// temporarily: the next waits 100 ms, then 200 ms, doubling up to this
+	// value, until a dial succeeds. 0 disables the backoff.
+	DialBackoffMax time.Duration
+
 	// Parameters used to configure TLS connections to Gel server.
 	TLSOptions TLSOptions
 
