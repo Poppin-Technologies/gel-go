@@ -45,6 +45,10 @@ type query struct {
 	unsafeIsolationDangers []error
 	isInTx                 bool
 
+	// ctx is the caller's context for this run of the query; the read
+	// loops stop at a message boundary when it ends (drain.go).
+	ctx context.Context
+
 	// Used when providing the position of errors in a query.
 	// The fully qualified edgeql file path.
 	// If cmd is not from it's own file then use the value "query".

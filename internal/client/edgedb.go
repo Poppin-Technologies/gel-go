@@ -244,17 +244,31 @@ func (c *protocolConnection) ScriptFlow(ctx context.Context, q *query) error {
 		return err
 	}
 
-	deadline, _ := ctx.Deadline()
-	err = c.soc.SetDeadline(deadline)
+	// Backstop only: the read loops leave at a message boundary when ctx
+	// ends (drain.go), so a reply still streaming when the caller gives up
+	// is drained, not torn down. A server that stops mid-message for
+	// longer than the drain budget still trips this deadline and loses the
+	// connection, as before.
+	err = c.soc.SetDeadline(backstopDeadline(ctx))
 	if err != nil {
 		return err
 	}
+	q.ctx = ctx
 
 	switch {
 	case c.protocolVersion.GTE(protocolVersion2p0):
 		err = c.execGranularFlow2pX(r, q)
 	default:
 		err = c.execGranularFlow1pX(r, q)
+	}
+
+	if interrupted(err) {
+		if c.isClosed() {
+			// The backstop deadline fired too: nothing left to drain.
+			return gelerr.NewClientConnectionClosedError("", err)
+		}
+		c.drainThenRelease(r)
+		return err
 	}
 
 	return FirstError(err, c.releaseReader(r))
@@ -277,17 +291,31 @@ func (c *protocolConnection) granularFlow(
 		return err
 	}
 
-	deadline, _ := ctx.Deadline()
-	err = c.soc.SetDeadline(deadline)
+	// Backstop only: the read loops leave at a message boundary when ctx
+	// ends (drain.go), so a reply still streaming when the caller gives up
+	// is drained, not torn down. A server that stops mid-message for
+	// longer than the drain budget still trips this deadline and loses the
+	// connection, as before.
+	err = c.soc.SetDeadline(backstopDeadline(ctx))
 	if err != nil {
 		return err
 	}
+	q.ctx = ctx
 
 	switch {
 	case c.protocolVersion.GTE(protocolVersion2p0):
 		err = c.execGranularFlow2pX(r, q)
 	default:
 		err = c.execGranularFlow1pX(r, q)
+	}
+
+	if interrupted(err) {
+		if c.isClosed() {
+			// The backstop deadline fired too: nothing left to drain.
+			return gelerr.NewClientConnectionClosedError("", err)
+		}
+		c.drainThenRelease(r)
+		return err
 	}
 
 	return FirstError(err, c.releaseReader(r))

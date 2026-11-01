@@ -90,7 +90,9 @@ func (c *protocolConnection) parse1pX(
 	}
 
 	var desc *CommandDescription
-	done := buff.NewSignal()
+	done, stopDone := queryDone(q.ctx)
+	defer stopDone()
+	ready := false
 
 	for r.Next(done.Chan) {
 		switch Message(r.MsgType) {
@@ -104,6 +106,7 @@ func (c *protocolConnection) parse1pX(
 			err = wrapAll(err, e)
 		case ReadyForCommand:
 			decodeReadyForCommandMsg(r)
+			ready = true
 			done.Signal()
 		case ErrorResponse:
 			err = wrapAll(err, decodeErrorResponseMsg(r, q.cmd, q.filename))
@@ -115,8 +118,16 @@ func (c *protocolConnection) parse1pX(
 		}
 	}
 
-	if r.Err != nil || err != nil {
+	if r.Err != nil {
 		return nil, wrapAll(r.Err, err)
+	}
+	if !ready {
+		// ctx ended between messages before ReadyForCommand; the reply is
+		// still coming and drainThenRelease finishes it (edgedb.go).
+		return nil, newQueryInterrupted(q.ctx)
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	return desc, nil
@@ -218,7 +229,9 @@ func (c *protocolConnection) execute1pX(
 	if q.expCard == AtMostOne {
 		err = ErrZeroResults
 	}
-	done := buff.NewSignal()
+	done, stopDone := queryDone(q.ctx)
+	defer stopDone()
+	ready := false
 
 	for r.Next(done.Chan) {
 		switch Message(r.MsgType) {
@@ -253,6 +266,7 @@ func (c *protocolConnection) execute1pX(
 			}
 		case ReadyForCommand:
 			decodeReadyForCommandMsg(r)
+			ready = true
 			done.Signal()
 		case ErrorResponse:
 			if err == ErrZeroResults {
@@ -270,6 +284,11 @@ func (c *protocolConnection) execute1pX(
 
 	if r.Err != nil {
 		return wrapAll(err, r.Err)
+	}
+	if !ready {
+		// ctx ended between messages before ReadyForCommand; the reply is
+		// still coming and drainThenRelease finishes it (edgedb.go).
+		return newQueryInterrupted(q.ctx)
 	}
 
 	if !q.flat() && q.fmt != Null {
