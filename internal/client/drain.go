@@ -75,6 +75,15 @@ func interrupted(err error) bool {
 	return errors.As(err, &qi)
 }
 
+// IsInterrupted is interrupted for the root package (gel.IsInterrupted).
+func IsInterrupted(err error) bool { return interrupted(err) }
+
+// NewInterruptedError builds a queryInterrupted around cause, for the root
+// package's test helper.
+func NewInterruptedError(cause error) error {
+	return &queryInterrupted{cause: cause}
+}
+
 // backstopDeadline is the socket read deadline a flow sets for its query:
 // the ctx deadline plus the drain budget, or none when the ctx has none.
 // Ordinary ctx expiry is handled at a message boundary well before it.
