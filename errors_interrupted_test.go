@@ -36,7 +36,7 @@ func TestIsInterrupted(t *testing.T) {
 		t.Fatal("IsInterrupted does not see through fmt.Errorf wrapping")
 	}
 	if IsInterrupted(context.DeadlineExceeded) {
-		t.Fatal("a bare ctx error (a pool-acquire timeout) reads as interrupted")
+		t.Fatal("a bare ctx error (pool-acquire timeout) reads as interrupted")
 	}
 	if IsInterrupted(fmt.Errorf("gel: %w", context.DeadlineExceeded)) {
 		t.Fatal("the pool's own ctx error shape reads as interrupted")
