@@ -102,13 +102,13 @@ func TestDialGateBacksOffAfterPressure(t *testing.T) {
 	}
 
 	g.release(nil)
-	if w := g.waitFor(); w > 0 {
+	if w = g.waitFor(); w > 0 {
 		t.Fatalf("a success left a window of %v", w)
 	}
 	// a success halves the backoff (200 → 100 ms), so the NEXT failure
 	// opens a 200 ms window where it would have opened 400 ms
 	g.release(timeoutErr())
-	w := g.waitFor()
+	w = g.waitFor()
 	if w <= 100*time.Millisecond || w > 200*time.Millisecond {
 		t.Fatalf("after a success the next failure opened %v, want ~200 ms", w)
 	}
