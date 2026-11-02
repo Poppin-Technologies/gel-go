@@ -89,9 +89,9 @@ func (g *dialGate) acquire(ctx context.Context) error {
 	return nil
 }
 
-// waitFor is how long the backoff still holds dials back.
+// waitFor is how long the backoff still holds dials back (0 for a nil gate).
 func (g *dialGate) waitFor() time.Duration {
-	if g.maxBackoff <= 0 {
+	if g == nil || g.maxBackoff <= 0 {
 		return 0
 	}
 	g.mu.Lock()
@@ -117,7 +117,13 @@ func (g *dialGate) release(err error) {
 	defer g.mu.Unlock()
 	switch {
 	case err == nil:
-		g.backoff, g.notBefore = 0, time.Time{}
+		// One success opens the door again but only halves the window, so
+		// a server that accepts every other dial does not reset the brake.
+		g.backoff /= 2
+		if g.backoff < dialBackoffFirst {
+			g.backoff = 0
+		}
+		g.notBefore = time.Time{}
 	case isDialPressure(err):
 		if g.backoff == 0 {
 			g.backoff = dialBackoffFirst

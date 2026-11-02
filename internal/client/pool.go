@@ -178,6 +178,26 @@ func (p *Pool) Acquire(
 	}
 
 	for {
+		// While the dial gate holds dials back (a dial just timed out or
+		// failed temporarily), queue on a live connection first: dialling
+		// into a server that cannot accept is what turned the 2026-10-31
+		// slowdown into failed requests. The wait is bounded by the gate's
+		// window and by ctx; a connection that frees up meanwhile is taken.
+		if wait := p.dial.waitFor(); wait > 0 {
+			t := time.NewTimer(wait)
+			select {
+			case acquireIfNotTimedout := <-p.freeConns:
+				t.Stop()
+				if conn := acquireIfNotTimedout(); conn != nil {
+					return conn, nil
+				}
+				continue
+			case <-t.C:
+			case <-ctx.Done():
+				t.Stop()
+				return nil, fmt.Errorf("gel: %w", ctx.Err())
+			}
+		}
 		select {
 		case acquireIfNotTimedout := <-p.freeConns:
 			conn := acquireIfNotTimedout()
@@ -271,6 +291,33 @@ func (p *Pool) Release(conn *transactableConn, err error) error {
 	}
 
 	return nil
+}
+
+// Warm opens connections until the pool holds its concurrency, so a rise in
+// load never has to dial into a busy server: a pool that boots with one
+// connection per shard and grows on demand spends the first seconds of
+// every storm dialling (2026-10-31, and the 2026-11-02 staging replay: ~500
+// dials a minute per task, almost all timing out). Best effort: the first
+// error stops it and is returned with the count opened so far.
+func (p *Pool) Warm(ctx context.Context) (opened int, err error) {
+	var held []*transactableConn
+	for {
+		conn, e := p.Acquire(ctx)
+		if e != nil {
+			err = e
+			break
+		}
+		held = append(held, conn)
+		if len(held) >= p.Concurrency {
+			break
+		}
+	}
+	for _, c := range held {
+		if e := p.Release(c, nil); e != nil && err == nil {
+			err = e
+		}
+	}
+	return len(held), err
 }
 
 // EnsureConnected forces the pool to connect if it hasn't already.

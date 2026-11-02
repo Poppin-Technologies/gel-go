@@ -77,6 +77,13 @@ func (c *Client) EnsureConnected(ctx context.Context) error {
 // and returns an error if called more than once.
 func (c *Client) Close() error { return c.pool.Close() }
 
+// Warm opens connections until the client holds its full concurrency, so a
+// rise in load never has to dial into a busy server. It returns how many
+// connections the pool holds and the first error, if any.
+func (c *Client) Warm(ctx context.Context) (int, error) {
+	return c.pool.Warm(ctx)
+}
+
 // Execute an EdgeQL command (or commands).
 func (c *Client) Execute(ctx context.Context, cmd string, args ...interface{}) error { //nolint:lll
 	conn, err := c.pool.Acquire(ctx)
