@@ -54,7 +54,8 @@ func NewPool(dsn string, opts gelcfg.Options) (*Pool, error) { // nolint:gocriti
 		Concurrency:   int(opts.Concurrency),
 		dial: newDialGate(
 			opts.DialConcurrency, opts.DialBackoffMax),
-		freeConns:            make(chan func() *transactableConn, 1),
+		freeConns: make(chan func() *transactableConn,
+			idleCapacity(opts.Concurrency)),
 		potentialConnsMutext: &sync.Mutex{},
 		cacheCollection: cacheCollection{
 			ServerSettings:    cfg.ServerSettings,
@@ -197,6 +198,24 @@ func (p *Pool) Acquire(
 	}
 }
 
+// idleCapacity is how many released connections a pool keeps idle. Upstream
+// kept ONE (freeConns had capacity 1) and closed every other connection on
+// release ("we have MinConns idle"), so a shard's connection count breathed
+// with its concurrency: every dip closed sockets and every rise dialled new
+// ones. Under a saturated Gel frontend those re-dials time out (2026-10-31:
+// hundreds of dials a minute per task, each a 3 s connect that failed), so a
+// pool now keeps up to its concurrency idle and the idle timer alone trims
+// connections that really sit unused. A pool whose concurrency is decided by
+// the server at first connect gets DefaultConcurrency slots; a server
+// suggesting more than that still sees the old close-on-release for the
+// excess, counted in Stats().PoolTrims.
+func idleCapacity(concurrency uint) int {
+	if concurrency > 0 {
+		return int(concurrency)
+	}
+	return DefaultConcurrency
+}
+
 // Release puts a connection back in the pool.
 func (p *Pool) Release(conn *transactableConn, err error) error {
 	if isClientConnectionError(err) {
@@ -215,7 +234,8 @@ func (p *Pool) Release(conn *transactableConn, err error) error {
 		case p.freeConns <- func() *transactableConn { return conn }:
 			return nil
 		default:
-			// we have MinConns idle so no need to keep this connection.
+			// the idle list is full: trim this connection.
+			statPoolTrims.Add(1)
 			p.potentialConns <- struct{}{}
 			return conn.Close()
 		}
@@ -244,7 +264,8 @@ func (p *Pool) Release(conn *transactableConn, err error) error {
 			}
 		}()
 	default:
-		// we have MinConns idle so no need to keep this connection.
+		// the idle list is full: trim this connection.
+		statPoolTrims.Add(1)
 		p.potentialConns <- struct{}{}
 		return conn.Close()
 	}

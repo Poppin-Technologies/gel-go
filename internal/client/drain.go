@@ -130,6 +130,10 @@ type ConnectionStats struct {
 	Dials int64
 	// DialFailures counts connection attempts that failed.
 	DialFailures int64
+	// PoolTrims counts connections closed on release because the pool's idle
+	// list was full (pool.go idleCapacity). Non-zero means a pool still
+	// breathes connections with its concurrency.
+	PoolTrims int64
 }
 
 var (
@@ -137,6 +141,7 @@ var (
 	statDrainFailures atomic.Int64
 	statDials         atomic.Int64
 	statDialFailures  atomic.Int64
+	statPoolTrims     atomic.Int64
 )
 
 // Stats returns the process-wide connection counters.
@@ -146,6 +151,7 @@ func Stats() ConnectionStats {
 		DrainFailures: statDrainFailures.Load(),
 		Dials:         statDials.Load(),
 		DialFailures:  statDialFailures.Load(),
+		PoolTrims:     statPoolTrims.Load(),
 	}
 }
 
